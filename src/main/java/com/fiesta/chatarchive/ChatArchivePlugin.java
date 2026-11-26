@@ -3,11 +3,6 @@ package com.fiesta.chatarchive;
 import com.google.gson.Gson;
 import io.papermc.paper.event.player.AsyncChatEvent;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
-import net.ess3.api.events.PrivateMessageSentEvent;
-import net.essentialsx.api.v2.events.HelpopMessageSendEvent;
-import net.essentialsx.api.v2.events.UserMailEvent;
-import net.essentialsx.api.v2.events.chat.GlobalChatEvent;
-import net.essentialsx.api.v2.events.chat.LocalChatEvent;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -22,6 +17,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Locale;
@@ -31,6 +28,9 @@ import java.util.logging.Level;
 
 public final class ChatArchivePlugin extends JavaPlugin implements Listener {
     private static final Set<String> COMMANDS = Set.of("tell","msg","w","whisper","r","reply","m","t","pm","emsg","epm","etell","ewhisper","er","ereply","mail","email","eemail","memo","ememo","helpop","ehelpop","ac","eac","amsg","eamsg","me","eme","action","eaction","describe","edescribe","teammsg","tm","agyreply");
+    private static final Set<PosixFilePermission> FILE_PERMISSIONS = Set.of(
+            PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE,
+            PosixFilePermission.GROUP_READ, PosixFilePermission.GROUP_WRITE);
     private Path file;
     private final Object writeLock = new Object();
     private final Gson gson = new Gson();
@@ -51,14 +51,28 @@ public final class ChatArchivePlugin extends JavaPlugin implements Listener {
         return true;
     }
     @Override public void onEnable() {
+        saveDefaultConfig();
+        Path configured = Path.of(getConfig().getString("archive-file", "chat-events.jsonl"));
+        file = (configured.isAbsolute() ? configured : getDataFolder().toPath().resolve(configured)).normalize();
         try {
-            Files.createDirectories(getDataFolder().toPath());
+            Path parent = file.getParent();
+            if (parent != null) Files.createDirectories(parent);
+            if (Files.notExists(file)) createArchiveFile(file);
         } catch (java.io.IOException error) {
-            throw new IllegalStateException("Could not create the chat archive directory", error);
+            throw new IllegalStateException("Could not create the chat archive file", error);
         }
-        file = getDataFolder().toPath().resolve("chat-events.jsonl");
         getServer().getPluginManager().registerEvents(this,this);
-        getLogger().info("Synchronous chat event archival enabled; direct messages from other plugins may require integration.");
+        if (getServer().getPluginManager().isPluginEnabled("Essentials")) {
+            try {
+                Class<?> type = Class.forName("com.fiesta.chatarchive.EssentialsArchiveListener", true, getClass().getClassLoader());
+                Listener listener = (Listener) type.getConstructor(ChatArchivePlugin.class).newInstance(this);
+                getServer().getPluginManager().registerEvents(listener, this);
+                getLogger().info("Essentials private-message, mail, and helpop archival enabled.");
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException("Could not load Essentials chat archive integration", error);
+            }
+        }
+        getLogger().info("Durable Paper chat and command archival enabled: " + file.getFileName());
     }
     @EventHandler(priority=EventPriority.MONITOR, ignoreCancelled=true)
     public void onChat(AsyncChatEvent e) {
@@ -76,23 +90,6 @@ public final class ChatArchivePlugin extends JavaPlugin implements Listener {
     public void onBroadcast(BroadcastMessageEvent e) {
         record("broadcast","server_or_plugin",null,PlainTextComponentSerializer.plainText().serialize(e.message()));
     }
-    @EventHandler(priority=EventPriority.MONITOR)
-    public void onPrivate(PrivateMessageSentEvent e) {
-        if (e.getResponse().isSuccess()) record("essentials_private",e.getSender().getName(),e.getRecipient().getName(),e.getMessage());
-    }
-    @EventHandler(priority=EventPriority.MONITOR, ignoreCancelled=true)
-    public void onMail(UserMailEvent e) {
-        record("essentials_mail",e.getMessage().getSenderUsername(),e.getRecipient().getName(),e.getMessage().getMessage());
-    }
-    @EventHandler(priority=EventPriority.MONITOR)
-    public void onHelp(HelpopMessageSendEvent e) {
-        record("essentials_helpop",e.getSender().getName(),null,e.getMessage());
-    }
-    @EventHandler(priority=EventPriority.MONITOR, ignoreCancelled=true)
-    public void onLocal(LocalChatEvent e) { record("essentials_local_chat",e.getPlayer().getName(),null,e.getMessage()); }
-    @EventHandler(priority=EventPriority.MONITOR, ignoreCancelled=true)
-    public void onGlobal(GlobalChatEvent e) { record("essentials_global_chat",e.getPlayer().getName(),null,e.getMessage()); }
-
     public static void durableAppend(Path path, String line) throws java.io.IOException {
         byte[] data=(line+"\n").getBytes(StandardCharsets.UTF_8);
         try(FileChannel file=FileChannel.open(path,StandardOpenOption.CREATE,StandardOpenOption.WRITE,StandardOpenOption.APPEND)) {
@@ -101,14 +98,21 @@ public final class ChatArchivePlugin extends JavaPlugin implements Listener {
             file.force(true);
         }
     }
-    private void record(String type,String sender,String recipient,String message) {
+    private static void createArchiveFile(Path path) throws java.io.IOException {
+        try {
+            Files.createFile(path, PosixFilePermissions.asFileAttribute(FILE_PERMISSIONS));
+        } catch (UnsupportedOperationException error) {
+            Files.createFile(path);
+        }
+    }
+    void record(String type,String sender,String recipient,String message) {
         Map<String,String> item=new LinkedHashMap<>();
         item.put("time_utc",Instant.now().toString());item.put("type",type);item.put("sender",sender);
         if(recipient!=null)item.put("recipient",recipient);
         item.put("message",message);
         synchronized(writeLock) {
             try { durableAppend(file,gson.toJson(item)); }
-            catch(Exception ex) { getLogger().log(Level.SEVERE,"Chat archive write failed; event was not preserved",ex); }
+            catch(java.io.IOException ex) { getLogger().log(Level.SEVERE,"Chat archive write failed; event was not preserved",ex); }
         }
     }
 }

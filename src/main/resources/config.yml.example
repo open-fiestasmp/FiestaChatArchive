@@ -1,0 +1,2 @@
+# Relative paths are stored in this plugin's data folder.
+archive-file: chat-events.jsonl

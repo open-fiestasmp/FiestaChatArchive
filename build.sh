@@ -8,4 +8,5 @@ rm -rf build/classes
 mkdir -p build/classes
 find src/main/java -name '*.java' -print0 | xargs -0 javac --release 21 -encoding UTF-8 -cp "$PLUGIN_API_CLASSPATH" -d build/classes
 cp src/main/resources/plugin.yml build/classes/plugin.yml
+cp src/main/resources/config.yml.example build/classes/config.yml
 jar --create --file build/plugin.jar -C build/classes .
